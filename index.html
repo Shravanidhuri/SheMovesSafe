@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SheMovesSafe - Safe Routing AI</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <!-- Splash Screen -->
+    <div id="splash-screen">
+        <div class="splash-content">
+            <div class="logo-pulse">🛡️</div>
+            <h1>SheMovesSafe</h1>
+            <p>Navigating you safely.</p>
+        </div>
+    </div>
+
+    <div class="app-container">
+        <!-- Sidebar / Floating Panel -->
+        <div class="control-panel">
+            <div class="header">
+                <div style="display: flex; justify-content: space-between; align-items: start;">
+                    <div>
+                        <h1>SheMovesSafe</h1>
+                        <div class="ai-badge" style="display: inline-block; margin-bottom: 8px;">AI Powered</div>
+                    </div>
+                    <button id="theme-toggle" title="Toggle Dark/Light Mode"
+                        style="background:none; border:none; font-size: 1.5em; cursor: pointer;">🌙</button>
+                </div>
+                <p>Find the safest route, not just the fastest.</p>
+            </div>
+
+            <div class="input-group">
+                <div class="input-wrapper">
+                    <span class="icon">🟢</span>
+                    <input type="text" id="start-loc" placeholder="Enter Start Location">
+                    <button id="gps-btn" title="Use Current Location">🎯</button>
+                </div>
+                <div class="connector-line"></div>
+                <div class="input-wrapper">
+                    <span class="icon">📍</span>
+                    <input type="text" id="dest-loc" placeholder="Enter Destination">
+                </div>
+            </div>
+
+            <div class="transport-modes">
+                <label class="mode-option">
+                    <input type="radio" name="transport" value="walking" checked>
+                    <span>🚶 Walk</span>
+                </label>
+                <label class="mode-option">
+                    <input type="radio" name="transport" value="scooter">
+                    <span>🛵 Scooter</span>
+                </label>
+                <label class="mode-option">
+                    <input type="radio" name="transport" value="car">
+                    <span>🚗 Car</span>
+                </label>
+            </div>
+
+            <button id="find-routes-btn" class="primary-btn">Find Safe Routes</button>
+
+            <!-- Loading State -->
+            <div id="loading" class="hidden">
+                <div class="spinner"></div>
+                Analyzing risk factors...
+            </div>
+
+            <!-- Route List will be injected here -->
+            <div id="routes-list" class="routes-container hidden">
+                <!-- Javascript will populate this -->
+            </div>
+
+            <!-- AI Analysis Panel -->
+            <div id="ai-panel" class="ai-panel hidden">
+                <div class="ai-header">
+                    <span class="gemini-icon">✨</span> Gemini Safety Analysis
+                </div>
+                <p id="ai-text">Thinking...</p>
+            </div>
+
+            <button id="sos-btn" class="sos-btn">SOS / HELP</button>
+        </div>
+
+        <!-- Map Container -->
+        <div id="map">
+            <button id="scan-btn" class="map-floating-btn">🛡️ Scan Safe Spots in Area</button>
+        </div>
+    </div>
+
+    <!-- SOS Modal -->
+
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="script.js"></script>
+</body>
+
+</html>
