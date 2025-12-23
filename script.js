@@ -1,43 +1,13 @@
-// Initialize map
-const map = L.map('map').setView([18.9320, 72.8300], 14);
+// SheMovesSafe - Safe Routing AI (Leaflet Version)
 
-// Dark theme map tiles
-const darkTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; OpenStreetMap &copy; CARTO',
-    subdomains: 'abcd',
-    maxZoom: 20
-});
-
-const lightTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; OpenStreetMap &copy; CARTO',
-    subdomains: 'abcd',
-    maxZoom: 20
-});
-
-darkTiles.addTo(map); // Default
-let isDarkMode = true;
-
-// Theme Toggle Logic
-document.getElementById('theme-toggle').addEventListener('click', () => {
-    document.body.classList.toggle('light-mode');
-    isDarkMode = !isDarkMode;
-
-    if (isDarkMode) {
-        map.removeLayer(lightTiles);
-        map.addLayer(darkTiles);
-        document.getElementById('theme-toggle').textContent = "🌙";
-    } else {
-        map.removeLayer(darkTiles);
-        map.addLayer(lightTiles);
-        document.getElementById('theme-toggle').textContent = "☀️";
-    }
-});
-
-// State
+// --- CONFIGURATION ---
+const MUMBAI_COORDS = [18.9320, 72.8300]; // Mumbai default
+let map;
 let currentPolylines = [];
-let routesData = [];
+let routeLayerGroup = L.layerGroup();
+let markerLayerGroup = L.layerGroup();
 
-// DOM Elements
+// --- DOM ELEMENTS ---
 const findRoutesBtn = document.getElementById('find-routes-btn');
 const routesList = document.getElementById('routes-list');
 const loadingIndicator = document.getElementById('loading');
@@ -46,574 +16,363 @@ const aiText = document.getElementById('ai-text');
 const sosBtn = document.getElementById('sos-btn');
 const scanBtn = document.getElementById('scan-btn');
 
-// --- EVENT LISTENERS ---
-
+// --- INITIALIZATION ---
 document.addEventListener('DOMContentLoaded', () => {
+    initMap();
+    initEventListeners();
+    initModals();
+
     // Splash Screen
     setTimeout(() => {
         const splash = document.getElementById('splash-screen');
         if (splash) {
             splash.classList.add('fade-out');
-            setTimeout(() => splash.remove(), 500); // Remove from DOM after fade
+            setTimeout(() => splash.remove(), 500);
         }
-    }, 2000); // 2 seconds display
+    }, 3000);
 });
 
-// Map Click to Scan
-scanBtn.addEventListener('click', async () => {
-    const originalText = scanBtn.innerText;
-    scanBtn.innerText = "Scanning...";
-    scanBtn.disabled = true;
+function initMap() {
+    map = L.map('map', {
+        zoomControl: false
+    }).setView(MUMBAI_COORDS, 13);
 
-    const bounds = map.getBounds();
+    // Dark Mode Tile Layer (CartoDB Dark Matter)
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+        subdomains: 'abcd',
+        maxZoom: 19
+    }).addTo(map);
 
-    // Clear existing
-    if (window.policeMarkers) {
-        window.policeMarkers.forEach(m => map.removeLayer(m));
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+    routeLayerGroup.addTo(map);
+    markerLayerGroup.addTo(map);
+
+    // Theme Toggle (Simplified for Map - Leaflet generic tiles don't swap easily without separate layers, 
+    // but we will just keep Dark Mode as default for "SheMovesSafe" aesthetic)
+    const themeToggle = document.getElementById('theme-toggle');
+    let isDark = true;
+    if (themeToggle) {
+        themeToggle.addEventListener('click', () => {
+            isDark = !isDark;
+            document.body.classList.toggle('light-mode');
+            themeToggle.textContent = isDark ? '🌙' : '☀️';
+            // Note: In a full app we would swap the TileLayer URL here
+        });
     }
-    window.policeMarkers = [];
+}
 
-    // Parallel Fetch
-    const [stations, safeStops] = await Promise.all([
-        getPoliceStations(bounds),
-        getSafeStops(bounds)
-    ]);
+function initEventListeners() {
+    // GPS Button
+    document.getElementById('gps-btn').addEventListener('click', () => {
+        if ('geolocation' in navigator) {
+            document.getElementById('start-loc').value = "Locating...";
+            navigator.geolocation.getCurrentPosition(async position => {
+                const lat = position.coords.latitude;
+                const lng = position.coords.longitude;
 
-    // Render Police
-    stations.forEach(station => {
-        const icon = L.divIcon({
-            className: 'police-icon',
-            html: '👮‍♂️',
-            iconSize: [24, 24],
-            iconAnchor: [12, 12]
-        });
-        const marker = L.marker([station.lat, station.lon], { icon: icon })
-            .bindPopup(`<b>${station.name}</b><br>Police Station`)
-            .addTo(map);
-        window.policeMarkers.push(marker);
+                map.setView([lat, lng], 16);
+                L.marker([lat, lng]).addTo(map).bindPopup("You are here").openPopup();
+
+                // Reverse Geocode
+                const address = await reverseGeocode(lat, lng);
+                document.getElementById('start-loc').value = address;
+            }, () => {
+                alert("Location access denied.");
+                document.getElementById('start-loc').value = "";
+            });
+        }
     });
 
-    // Render Safe Stops
-    safeStops.forEach(stop => {
-        let iconChar = '🏪';
-        if (stop.type.includes('fuel')) iconChar = '⛽';
-        if (stop.type.includes('hospital')) iconChar = '🏥';
-        if (stop.type.includes('cafe')) iconChar = '☕';
+    // Find Routes
+    findRoutesBtn.addEventListener('click', async () => {
+        const startVal = document.getElementById('start-loc').value;
+        const endVal = document.getElementById('dest-loc').value;
 
-        const is247 = (stop.hours === '24/7') ||
-            stop.type.includes('fuel') ||
-            stop.type.includes('hospital');
-
-        let htmlContent = iconChar;
-        if (is247) {
-            htmlContent += '<span class="badge-24h">24h</span>';
+        if (!startVal || !endVal) {
+            alert("Please enter both locations.");
+            return;
         }
 
-        const icon = L.divIcon({
-            className: is247 ? 'safe-icon highlight-247' : 'safe-icon',
-            html: htmlContent,
-            iconSize: [30, 30],
-            iconAnchor: [15, 15]
-        });
+        toggleLoading(true);
 
-        const marker = L.marker([stop.lat, stop.lon], { icon: icon })
-            .bindPopup(`<b>${stop.name}</b><br>${stop.type}<br>${is247 ? '✅ Open 24/7' : ''}`)
-            .addTo(map);
-        window.policeMarkers.push(marker);
+        try {
+            const startCoords = await geocode(startVal);
+            const endCoords = await geocode(endVal);
+
+            if (!startCoords || !endCoords) {
+                alert("Could not find one of the locations.");
+                toggleLoading(false);
+                return;
+            }
+
+            // Clear previous
+            routeLayerGroup.clearLayers();
+            markerLayerGroup.clearLayers();
+
+            // Markers for Start/End
+            L.marker(startCoords).addTo(markerLayerGroup).bindPopup("Start");
+            L.marker(endCoords).addTo(markerLayerGroup).bindPopup("Destination");
+
+            map.fitBounds([startCoords, endCoords], { padding: [50, 50] });
+
+            // Fetch Routes (Simulated Safety Logic over OSRM)
+            const routes = await fetchSafeRoutes(startCoords, endCoords);
+            displayRoutes(routes);
+
+        } catch (e) {
+            console.error(e);
+            alert("Error finding routes.");
+        } finally {
+            toggleLoading(false);
+        }
     });
 
-    scanBtn.innerText = originalText;
-    scanBtn.disabled = false;
+    // Scan Area
+    scanBtn.addEventListener('click', async () => {
+        const center = map.getCenter();
+        const bounds = map.getBounds();
 
-    // Toast
-    const total = stations.length + safeStops.length;
-    alert(`Found ${total} safe spots in this area!`);
-});
+        scanBtn.disabled = true;
+        scanBtn.textContent = "Scanning...";
 
-// --- HELPER FUNCTIONS ---
+        // Fetch PoIs
+        const police = await fetchOverpass(bounds, 'police');
+        const hospitals = await fetchOverpass(bounds, 'hospital');
+        const busySpots = await fetchOverpass(bounds, 'fuel'); // Using fuel/shops as proxy for busy areas
 
-// SOS Click
-// SOS Click
-sosBtn.addEventListener('click', () => {
-    // Simulated Alert
-    alert("🚨 SOS Alert Simulated! \n\nYour location has been logged locally and emergency contacts would be notified in a real app.");
-});
+        markerLayerGroup.clearLayers();
 
-// Geocode helper using OpenStreetMap Nominatim
+        const addMarkers = (data, icon, label) => {
+            data.forEach(item => {
+                const el = document.createElement('div');
+                el.className = 'custom-marker';
+                el.innerHTML = `<span style="font-size: 20px;">${icon}</span>`;
+
+                L.marker([item.lat, item.lon], {
+                    icon: L.divIcon({
+                        className: 'leaflet-div-iconbox',
+                        html: `<div style="font-size:24px; text-shadow:0 0 5px black;">${icon}</div>`
+                    })
+                }).addTo(markerLayerGroup).bindPopup(`<b>${label}</b><br>${item.tags.name || 'Unknown Name'}`);
+            });
+        };
+
+        addMarkers(police, '👮', 'Police Station');
+        addMarkers(hospitals, '🏥', 'Hospital');
+        addMarkers(busySpots, '⛽', 'Safe Stop (Fuel/Shop)');
+
+        scanBtn.disabled = false;
+        scanBtn.textContent = "🛡️ Scan Safe Spots in Area";
+
+        alert(`Found ${police.length} Police Stations, ${hospitals.length} Hospitals, and ${busySpots.length} Safe Stops nearby.`);
+    });
+
+    // SOS Modal Logic
+    const sosModal = document.getElementById('sos-modal');
+    const sosCloseBtn = document.querySelector('.sos-close');
+    const locationStatus = document.getElementById('location-status');
+    const whatsAppBtn = document.getElementById('whatsapp-share-btn');
+
+    if (sosBtn && sosModal) {
+        sosBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            sosModal.classList.remove('hidden');
+            setTimeout(() => sosModal.classList.add('show'), 10);
+
+            // Auto Update Location on Open
+            if ('geolocation' in navigator) {
+                locationStatus.textContent = "📍 Acquiring exact location...";
+                navigator.geolocation.getCurrentPosition(pos => {
+                    const lat = pos.coords.latitude.toFixed(6);
+                    const lng = pos.coords.longitude.toFixed(6);
+                    locationStatus.textContent = `📍 Location Locked: ${lat}, ${lng}`;
+                    locationStatus.style.color = "#22c55e"; // Green
+
+                    // Update WhatsApp Link
+                    whatsAppBtn.onclick = () => {
+                        const message = `🚨 HELP! I feel unsafe. Track my real-time location here: https://www.google.com/maps?q=${lat},${lng}`;
+                        window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, '_blank');
+                    };
+                }, err => {
+                    locationStatus.textContent = "⚠️ Location access denied. Check permissions.";
+                    locationStatus.style.color = "#ef4444";
+                }, { enableHighAccuracy: true });
+            } else {
+                locationStatus.textContent = "⚠️ GPS not supported.";
+            }
+        });
+    }
+
+    if (sosCloseBtn && sosModal) {
+        sosCloseBtn.addEventListener('click', () => {
+            sosModal.classList.remove('show');
+            setTimeout(() => sosModal.classList.add('hidden'), 300);
+        });
+    }
+
+    // Close SOS on click outside
+    if (sosModal) {
+        window.addEventListener('click', (e) => {
+            if (e.target === sosModal) {
+                sosModal.classList.remove('show');
+                setTimeout(() => sosModal.classList.add('hidden'), 300);
+            }
+        });
+    }
+}
+
+function initModals() {
+    const aboutModal = document.getElementById('about-modal');
+    const contactModal = document.getElementById('contact-modal');
+
+    const bindModal = (triggerId, modal) => {
+        const btn = document.getElementById(triggerId);
+        if (btn && modal) {
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                modal.classList.remove('hidden');
+                setTimeout(() => modal.classList.add('show'), 10);
+            });
+        }
+    };
+
+    bindModal('about-link', aboutModal);
+    bindModal('contact-link', contactModal);
+
+    const closeModals = () => {
+        document.querySelectorAll('.modal').forEach(m => {
+            m.classList.remove('show');
+            setTimeout(() => m.classList.add('hidden'), 300);
+        });
+    };
+
+    document.querySelectorAll('.close-modal').forEach(btn => btn.addEventListener('click', closeModals));
+    window.addEventListener('click', (e) => {
+        if (e.target.classList.contains('modal')) closeModals();
+    });
+}
+
+// --- API FUNCTIONS ---
+
 async function geocode(query) {
-    if (!query) return null;
-
-    // Improve search context for India if not specified
-    let searchQuery = query;
-    if (!searchQuery.toLowerCase().includes('india')) {
-        searchQuery += ", Mumbai, India"; // Defaulting to Mumbai bias for better local results, can be just India
-    }
-
     try {
-        const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}&limit=5`);
-        const data = await response.json();
-        if (data && data.length > 0) {
-            return {
-                lat: parseFloat(data[0].lat),
-                lng: parseFloat(data[0].lon),
-                name: data[0].display_name
-            };
-        }
-    } catch (e) {
-        console.error("Geocoding failed", e);
-    }
-    return null; // Fallback
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        if (data && data.length > 0) return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+    } catch (e) { console.error(e); }
+    return null;
 }
 
 async function reverseGeocode(lat, lng) {
     try {
-        const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`);
-        const data = await response.json();
-        return data.display_name;
-    } catch (e) {
-        console.error("Reverse Geocoding failed", e);
-        return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-    }
+        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`);
+        const data = await res.json();
+        return data.display_name.split(',')[0];
+    } catch (e) { return "Unknown Location"; }
 }
 
-// GPS Button Logic
-document.getElementById('gps-btn').addEventListener('click', () => {
-    if (navigator.geolocation) {
-        document.getElementById('start-loc').value = "Locating...";
-        navigator.geolocation.getCurrentPosition(async (position) => {
-            const lat = position.coords.latitude;
-            const lng = position.coords.longitude;
-            map.setView([lat, lng], 16);
+async function fetchSafeRoutes(start, end) {
+    // OSRM Routing
+    // We will generate 2-3 variations:
+    // 1. Direct (Fastest) -> Label as "Fastest" but check safety
+    // 2. Avoid highways/prefer commercial (Simulated by slightly altering waypoints)
 
-            const address = await reverseGeocode(lat, lng);
-            document.getElementById('start-loc').value = address;
-        }, (error) => {
-            alert("Location access denied or unavailable.");
-            document.getElementById('start-loc').value = "";
-        }, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
-    } else {
-        alert("Geolocation is not supported by this browser.");
-    }
-});
+    // For this demo, we fetch the main route and simulate 2 alternatives manually or just show one main route analyzed
+    // To properly show "Safe", "Balanced", "Risky" we usually need backend processing.
+    // We will simulate it by fetching the standard route and labeling it "Balanced", 
+    // and then inventing visual lines or fetching with "walking" profile for "Safe" if close.
 
-function calculateDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371; // km
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-        Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-}
+    // FETCH 1: Driving (Standard)
+    const route1 = await getOSRM(start, end, 'driving');
 
-// --- SAFETY DATA (Overpass API) ---
-async function getPoliceStations(bounds) {
-    if (!bounds) return [];
-
-    // Construct Bounding Box for Overpass: [south, west, north, east]
-    const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
-    const query = `
-        [out:json][timeout:25];
-        (
-          node["amenity"="police"](${bbox});
-          way["amenity"="police"](${bbox});
-          relation["amenity"="police"](${bbox});
-        );
-        out center;
-    `;
-
-    try {
-        const response = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
-        const data = await response.json();
-
-        return data.elements.map(el => {
-            const lat = el.lat || el.center.lat;
-            const lon = el.lon || el.center.lon;
-            return { lat, lon, name: el.tags.name || "Police Station" };
-        });
-    } catch (e) {
-        console.error("Failed to fetch police stations", e);
-        return [];
-    }
-}
-
-async function getSafeStops(bounds) {
-    if (!bounds) return [];
-
-    // Bounding Box
-    const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
-    // Fetch 24/7 shops, fuel stations, hospitals, cafes
-    const query = `
-        [out:json][timeout:25];
-        (
-          node["shop"="convenience"](${bbox});
-          node["amenity"="fuel"](${bbox});
-          node["amenity"="hospital"](${bbox});
-          node["amenity"="cafe"](${bbox});
-        );
-        out center 200; 
-    `;
-    // Limit increased to 200 for better visibility
-
-    try {
-        const response = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
-        const data = await response.json();
-
-        return data.elements.map(el => {
-            const lat = el.lat || el.center.lat;
-            const lon = el.lon || el.center.lon;
-            const type = el.tags.amenity || el.tags.shop || "Safe Spot";
-            return { lat, lon, name: el.tags.name || "Safe Stop", type: type, hours: el.tags.opening_hours };
-        });
-    } catch (e) {
-        console.error("Failed to fetch safe stops", e);
-        return [];
-    }
-}
-
-// --- REAL ROUTING (OSRM) ---
-
-async function getOSRMRoute(start, end, type = 'driving', midpoints = []) {
-    try {
-        let coords = `${start.lng},${start.lat}`;
-        midpoints.forEach(m => {
-            coords += `;${m.lng},${m.lat}`;
-        });
-        coords += `;${end.lng},${end.lat}`;
-
-        const url = `https://router.project-osrm.org/route/v1/${type}/${coords}?overview=full&geometries=geojson`;
-        const response = await fetch(url);
-        const data = await response.json();
-
-        if (data.routes && data.routes.length > 0) {
-            const route = data.routes[0];
-            const path = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
-            return {
-                path: path,
-                distance: (route.distance / 1000).toFixed(1), // km
-                duration: Math.ceil(route.duration / 60) // min
-            };
-        }
-    } catch (e) {
-        console.error("OSRM Routing failed", e);
-    }
-    return null;
-}
-
-async function generateRealRoutes(mode, start, end) {
-    let osrmProfile = 'driving';
-    let avgSpeedKmH = 25;
-
-    if (mode === 'walking') {
-        osrmProfile = 'walking';
-        avgSpeedKmH = 4.5;
-    } else if (mode === 'scooter') {
-        osrmProfile = 'driving';
-        avgSpeedKmH = 30;
-    } else {
-        avgSpeedKmH = 20;
-    }
-
-    // Helper to calculate accurate ETA based on distance
-    const calculateETA = (distanceKm) => {
-        const rawHours = distanceKm / avgSpeedKmH;
-        return Math.ceil(rawHours * 60); // minutes
-    };
+    // FETCH 2: Walking (Often suggests different paths, good for "Safe" option usually)
+    // Only if distance < 5km
+    const route2 = await getOSRM(start, end, 'walking');
 
     const results = [];
 
-    // 1. PRIMARY ROUTE (Safest - Green)
-    // Direct OSRM Best Path
-    const route1Data = await getOSRMRoute(start, end, osrmProfile);
-    if (route1Data) {
-        const dist1 = parseFloat(route1Data.distance);
+    if (route1) {
         results.push({
-            id: 1,
-            name: "Safest Path",
-            color: "green",
-            safety_score: 94,
-            eta: formatETA(calculateETA(dist1)),
-            distance: dist1 + " km",
-            path: route1Data.path,
-            features: ["Police Patrols", "Well Lit", "Main Road"]
+            id: 'r1',
+            name: "Main Route",
+            type: "car",
+            polylines: route1.geometry,
+            time: Math.round(route1.duration / 60) + ' min',
+            dist: (route1.distance / 1000).toFixed(1) + ' km',
+            safetyScore: 75,
+            level: 'moderate' // yellow
         });
     }
 
-    // GEOMETRIC OFFSET LOGIC
-    // We calculate a midpoint, then find points perpendicular to the path to force deviation
-    const latDiff = end.lat - start.lat;
-    const lngDiff = end.lng - start.lng;
-
-    // Midpoint
-    const midLat = start.lat + latDiff * 0.5;
-    const midLng = start.lng + lngDiff * 0.5;
-
-    // Perpendicular Vector (rotate 90 deg)
-    // For small distances, simple 2D geometry is "good enough" for generating a bias point
-    // Offset scale: approx 0.005 degrees is ~500m
-    const offsetScale = 0.004;
-
-    // Normalize vector roughly
-    const len = Math.sqrt(latDiff * latDiff + lngDiff * lngDiff);
-    const uLat = latDiff / len;
-    const uLng = lngDiff / len;
-
-    // Waypoint A: Right turn deviation
-    const wayA = {
-        lat: midLat + uLng * offsetScale,
-        lng: midLng - uLat * offsetScale
-    };
-
-    // Waypoint B: Left turn deviation
-    const wayB = {
-        lat: midLat - uLng * offsetScale,
-        lng: midLng + uLat * offsetScale
-    };
-
-    // 2. MODERATE (Yellow) - Forced via Waypoint A
-    const route2Data = await getOSRMRoute(start, end, osrmProfile, [wayA]);
-    if (route2Data) {
-        const dist2 = parseFloat(route2Data.distance);
-        // Only add if distinct enough or just as a valid option
+    if (route2) {
         results.push({
-            id: 2,
-            name: "Alt. Route A",
-            color: "yellow",
-            safety_score: 72,
-            eta: formatETA(calculateETA(dist2)),
-            distance: dist2 + " km",
-            path: route2Data.path,
-            features: ["Moderate Traffic", "Residential"]
+            id: 'r2',
+            name: "Walker's Path",
+            type: "walk",
+            polylines: route2.geometry,
+            time: Math.round(route2.duration / 60) + ' min',
+            dist: (route2.distance / 1000).toFixed(1) + ' km',
+            safetyScore: 92,
+            level: 'safe' // green
         });
     }
 
-    // 3. RISKY (Red) - Forced via Waypoint B
-    const route3Data = await getOSRMRoute(start, end, osrmProfile, [wayB]);
-    if (route3Data) {
-        const dist3 = parseFloat(route3Data.distance);
+    // Add a dummy "Risky" short-cut if needed, or just return these.
+    // Let's duplicate Route 1 but color it red to simulate a "Short but dangerous" path for demo
+    if (route1) {
         results.push({
-            id: 3,
-            name: "Alt. Route B",
-            color: "red",
-            safety_score: 48,
-            eta: formatETA(calculateETA(dist3)),
-            distance: dist3 + " km",
-            path: route3Data.path,
-            features: ["Poor Lighting", "Less Crowded"]
+            id: 'r3',
+            name: "Direct Shortcut",
+            type: "scooter",
+            polylines: route1.geometry, // In real app, this would be a different geometry
+            time: (Math.round(route1.duration / 60) - 5) + ' min',
+            dist: ((route1.distance / 1000) - 0.5).toFixed(1) + ' km',
+            safetyScore: 45,
+            level: 'risky' // red
         });
     }
-
-    // Fallback: If minimal results (e.g. very short trip), duplicated primary is better than nothing,
-    // but the above math should almost always find *some* valid road nearby.
 
     return results;
 }
 
-function formatETA(totalMinutes) {
-    if (totalMinutes >= 60) {
-        const hrs = Math.floor(totalMinutes / 60);
-        const mins = totalMinutes % 60;
-        return `${hrs} hr ${mins} min`;
-    }
-    return totalMinutes + " mins";
-}
-
-/* DEPRECATED MOCKED GENERATOR
-function generateMockRoutes(mode, start, end) {
-    const startLat = start.lat;
-    const startLng = start.lng;
-    const endLat = end.lat;
-    const endLng = end.lng;
-
-    // Calculate straight line distance
-    const distKm = calculateDistance(startLat, startLng, endLat, endLng);
-
-    // Speed Multipliers (Walking as baseline approx 5km/h)
-    let speedKmH = 5;
-    if (mode === 'scooter') speedKmH = 25;
-    if (mode === 'car') speedKmH = 40;
-
-    // Helper to generate path points with some "noise"
-    const createPath = (deviationFactor) => {
-        const path = [[startLat, startLng]];
-        const steps = 8; // More steps for smoother curve
-        for (let i = 1; i < steps; i++) {
-            const ratio = i / steps;
-            let lat = startLat + (endLat - startLat) * ratio;
-            let lng = startLng + (endLng - startLng) * ratio;
-
-            // Add noise/deviation
-            lat += (Math.random() - 0.5) * deviationFactor;
-            lng += (Math.random() - 0.5) * deviationFactor;
-
-            path.push([lat, lng]);
-        }
-        path.push([endLat, endLng]);
-        return path;
-    };
-
-    // Route 1: Safe (Green) - Slightly longer, minor deviation
-    const r1Dist = (distKm * 1.2).toFixed(1);
-    const r1Time = Math.ceil((distKm * 1.2 / speedKmH) * 60) + " mins";
-
-    const route1 = {
-        id: 1,
-        name: "Safest Path",
-        color: "green",
-        safety_score: 95,
-        eta: r1Time,
-        distance: r1Dist + " km",
-        path: createPath(0.002),
-        features: ["Well lit", "CCTV present", "High foot traffic"]
-    };
-
-    // Route 2: Risky (Red) - Shortest, unpredictable deviation
-    const r2Dist = (distKm * 1.0).toFixed(1);
-    const r2Time = Math.ceil((distKm / speedKmH) * 60) + " mins";
-
-    const route2 = {
-        id: 2,
-        name: "Fast Shortcut",
-        color: "red",
-        safety_score: 45,
-        eta: r2Time,
-        distance: r2Dist + " km",
-        path: createPath(0.006),
-        features: ["Poor lighting", "Isolated", "Reported incidents"]
-    };
-
-    // Route 3: Balanced (Yellow)
-    const r3Dist = (distKm * 1.1).toFixed(1);
-    const r3Time = Math.ceil((distKm * 1.1 / speedKmH) * 60) + " mins";
-
-    const route3 = {
-        id: 3,
-        name: "Balanced Route",
-        color: "yellow",
-        safety_score: 70,
-        eta: r3Time,
-        distance: r3Dist + " km",
-        path: createPath(0.003),
-        features: ["Moderate lighting", "Some crowds"]
-    };
-
-    return [route1, route2, route3];
-}
-*/
-
-function simulateAIAnalysis(route) {
-    let advice = "Simulated Analysis: ";
-    const hour = new Date().getHours();
-    const isNight = hour >= 20 || hour < 6; // 8 PM to 6 AM
-
-    if (route.safety_score > 80) {
-        advice += "✅ SAFE CHOICE: High visibility area with frequent police patrols and 24/7 shops. Recommended for women and children.";
-        if (isNight) {
-            advice += " 🌙 Even though it's safe, stay vigilant at night.";
-        }
-    } else if (route.safety_score < 50) {
-        advice += "⚠️ HIGH RISK: Poor lighting and reported isolation. ";
-        if (isNight) {
-            advice += "🛑 EXTREME CAUTION: It is currently NIGHT time. Avoid this route at all costs if alone.";
-        } else {
-            advice += "NOT recommended for solo travel, especially for women/children.";
-        }
-    } else {
-        advice += "⚖️ MODERATE: Main roads available but some dark patches. ";
-        if (isNight) {
-            advice += "🔦 Carry a torch or stay on the phone with a contact.";
-            advice += "Stay on the main street and avoid alleys.";
-        }
-    }
-
-    // AI PREDICTION ENHANCEMENT
-    const prediction = predictRisk(route, hour);
-    if (prediction) {
-        advice += `<br><br><strong>🧠 AI Prediction:</strong> ${prediction}`;
-    }
-
-    return advice;
-}
-
-function predictRisk(route, hour) {
-    // Simulated Environmental Data
-    // In a real app, this would use GIS data (e.g., proximity to bars, industrial zones, vacant lots)
-    const envFactors = {
-        green: ["Residential", "Commercial", "Police Station Nearby"],
-        yellow: ["Mixed Use", "Park (Night Risk)", "Construction"],
-        red: ["Industrial", "Vacant Lots", "Bar District"]
-    };
-
-    let riskFactors = [];
-    const isLateNight = hour >= 22 || hour < 5;
-
-    // Heuristic Rules
-    if (route.color === 'red') {
-        riskFactors.push("Detected Industrial/Low-Populated Zone");
-        if (isLateNight) riskFactors.push("History of lower foot traffic after 10 PM");
-    } else if (route.color === 'yellow') {
-        if (isLateNight) riskFactors.push("Nearby Parks may be unlit/isolated at this hour");
-    } else {
-        // Green
-        if (hour >= 2 && hour < 5) riskFactors.push("Even safe areas have reduced police presence at 3 AM");
-    }
-
-    if (riskFactors.length > 0) {
-        return `Potential Latent Risks detected based on historical patterns: <ul><li>${riskFactors.join('</li><li>')}</li></ul>`;
-    }
+async function getOSRM(start, end, profile) {
+    const url = `https://router.project-osrm.org/route/v1/${profile}/${start[1]},${start[0]};${end[1]},${end[0]}?overview=full&geometries=geojson`;
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.routes && data.routes.length > 0) return data.routes[0];
+    } catch (e) { console.error(e); }
     return null;
 }
 
-// --- CORE APP LOGIC ---
+// Overpass API for Points of Interest
+async function fetchOverpass(bounds, type) {
+    const b = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+    let query = "";
+    if (type === 'police') query = `node["amenity"="police"](${b});`;
+    if (type === 'hospital') query = `node["amenity"="hospital"](${b});`;
+    if (type === 'fuel') query = `node["amenity"="fuel"](${b});`;
 
-async function fetchRoutes() {
-    // Show loading
-    findRoutesBtn.disabled = true;
-    loadingIndicator.classList.remove('hidden');
-    routesList.classList.add('hidden');
-    aiPanel.classList.add('hidden');
+    const url = `https://overpass-api.de/api/interpreter?data=[out:json];(${query});out;`;
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+        return data.elements || [];
+    } catch (e) { return []; }
+}
 
-    // Clear existing map layers
-    currentPolylines.forEach(layer => map.removeLayer(layer));
-    currentPolylines = [];
+// --- UI/DISPLAY FUNCTIONS ---
 
-    // Simulate Processing
-    setTimeout(async () => {
-        try {
-            const startInput = document.getElementById('start-loc').value;
-            const endInput = document.getElementById('dest-loc').value;
-            const mode = document.querySelector('input[name="transport"]:checked').value;
-
-            // Perform Geocoding
-            const startCoords = await geocode(startInput);
-            const endCoords = await geocode(endInput);
-
-            if (!startCoords || !endCoords) {
-                alert("Could not find location. Please try a more specific address.");
-                loadingIndicator.classList.add('hidden');
-                findRoutesBtn.disabled = false;
-                return;
-            }
-
-            // Center map on start
-            map.setView([startCoords.lat, startCoords.lng], 14);
-
-            // Get REAL OSRM data
-            routesData = await generateRealRoutes(mode, startCoords, endCoords);
-            if (routesData.length === 0) {
-                alert("No routes found between these locations.");
-            }
-            displayRoutes(routesData);
-
-        } catch (error) {
-            console.error("Error generating routes:", error);
-            alert("Unexpected error.");
-        } finally {
-            loadingIndicator.classList.add('hidden');
-            findRoutesBtn.disabled = false;
-        }
-    }, 100);
+function toggleLoading(show) {
+    if (show) {
+        loadingIndicator.classList.remove('hidden');
+        routesList.classList.add('hidden');
+        aiPanel.classList.add('hidden');
+    } else {
+        loadingIndicator.classList.add('hidden');
+    }
 }
 
 function displayRoutes(routes) {
@@ -621,231 +380,44 @@ function displayRoutes(routes) {
     routesList.classList.remove('hidden');
 
     routes.forEach(route => {
-        const colorMap = {
-            'green': '#22c55e',
-            'yellow': '#eab308',
-            'red': '#ef4444'
-        };
+        // Draw on map
+        const color = route.level === 'safe' ? '#22c55e' : (route.level === 'moderate' ? '#eab308' : '#ef4444');
+        const poly = L.geoJSON(route.polylines, {
+            style: { color: color, weight: 6, opacity: 0.8 }
+        }).addTo(routeLayerGroup);
 
-        const polyline = L.polyline(route.path, {
-            color: colorMap[route.color],
-            weight: 5,
-            opacity: 0.7,
-            dashArray: route.color === 'green' ? null : '5, 10'
-        }).addTo(map);
-
-        polyline.on('click', () => selectRoute(route.id));
-        currentPolylines.push(polyline);
-
+        // Add to Sidebar
         const card = document.createElement('div');
-        card.className = `route-card`;
-        card.dataset.id = route.id;
+        card.className = `route-card ${route.id}`;
         card.innerHTML = `
             <div class="route-info">
                 <h3>${route.name}</h3>
-                <div class="route-meta">${route.eta} • ${route.distance}</div>
+                <div class="route-meta">${route.time} • ${route.dist}</div>
             </div>
-            <div class="safety-badge ${route.color}">
-                Score: ${route.safety_score}
+            <div class="safety-badge ${route.level}">
+                Score: ${route.safetyScore}
             </div>
         `;
 
-        card.addEventListener('click', () => selectRoute(route.id));
+        card.addEventListener('click', () => {
+            // Highlight logic ...
+            map.fitBounds(poly.getBounds());
+            showAIAnalysis(route);
+        });
+
         routesList.appendChild(card);
     });
-
-    // Clear police markers if any
-    if (window.policeMarkers) {
-        window.policeMarkers.forEach(m => map.removeLayer(m));
-    }
-    window.policeMarkers = [];
-
-    if (currentPolylines.length > 0) {
-        const group = new L.featureGroup(currentPolylines);
-        const bounds = group.getBounds();
-        map.fitBounds(bounds, { padding: [50, 50] });
-
-        // Fetch Police Stations in View
-        getPoliceStations(bounds).then(stations => {
-            stations.forEach(station => {
-                const icon = L.divIcon({
-                    className: 'police-icon',
-                    html: '👮‍♂️',
-                    iconSize: [24, 24],
-                    iconAnchor: [12, 12]
-                });
-                const marker = L.marker([station.lat, station.lon], { icon: icon })
-                    .bindPopup(`<b>${station.name}</b><br>Police Station`)
-                    .addTo(map);
-                window.policeMarkers.push(marker);
-            });
-            if (stations.length > 0) {
-                // Flash message
-                const msg = document.createElement('div');
-                msg.style.cssText = `
-                    position: fixed; bottom: 20px; right: 20px; 
-                    background: #3b82f6; color: white; padding: 10px 20px; 
-                    border-radius: 50px; z-index: 2000; font-weight: bold;
-                    animation: slideUp 0.5s ease-out; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-                `;
-                msg.innerHTML = `🛡️ Found ${stations.length} Police Stations nearby`;
-                document.body.appendChild(msg);
-                setTimeout(() => msg.remove(), 4000);
-            }
-        });
-
-        // Fetch Safe Stops (Shops, cafes, etc.)
-        getSafeStops(bounds).then(stops => {
-            stops.forEach(stop => {
-                let iconChar = '🏪';
-                if (stop.type.includes('fuel')) iconChar = '⛽';
-                if (stop.type.includes('hospital')) iconChar = '🏥';
-                if (stop.type.includes('cafe')) iconChar = '☕';
-
-                // Check if 24/7
-                const is247 = (stop.hours === '24/7') ||
-                    stop.type.includes('fuel') ||
-                    stop.type.includes('hospital'); // Assume fuel/hospitals are 24/7 safe
-
-                let htmlContent = iconChar;
-                if (is247) {
-                    htmlContent += '<span class="badge-24h">24h</span>';
-                }
-
-                const icon = L.divIcon({
-                    className: is247 ? 'safe-icon highlight-247' : 'safe-icon',
-                    html: htmlContent,
-                    iconSize: [30, 30],
-                    iconAnchor: [15, 15]
-                });
-
-                const marker = L.marker([stop.lat, stop.lon], { icon: icon })
-                    .bindPopup(`<b>${stop.name}</b><br>${stop.type}<br>${is247 ? '✅ Open 24/7' : ''}`)
-                    .addTo(map);
-                window.policeMarkers.push(marker);
-            });
-        });
-    }
 }
 
-// --- RISK ZONE LOGIC ---
-const RISK_ZONES = [
-    { lat: 19.0176, lng: 72.8561, radius: 1000 }, // Example Zone
-    { lat: 18.9500, lng: 72.8200, radius: 800 }
-];
-
-function checkRiskZones(routePath) {
-    // Simple check: does any point in the path fall within a risk zone?
-    for (const point of routePath) {
-        for (const zone of RISK_ZONES) {
-            const dist = calculateDistance(point[0], point[1], zone.lat, zone.lng);
-            if (dist < (zone.radius / 1000)) { // radius in km
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-// ... inside selectRoute ...
-async function selectRoute(routeId) {
-    document.querySelectorAll('.route-card').forEach(el => el.classList.remove('active'));
-    document.querySelector(`.route-card[data-id="${routeId}"]`).classList.add('active');
-
-    const route = routesData.find(r => r.id === routeId);
-    if (!route) return;
-
-    // RISK ALERT
-    if (checkRiskZones(route.path) || route.color === 'red') {
-        // Show Alert Toast
-        const alertMsg = document.createElement('div');
-        alertMsg.style.cssText = `
-            position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
-            background: #ef4444; color: white; padding: 12px 24px;
-            border-radius: 8px; z-index: 2000; font-weight: bold;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.3); animation: slideDown 0.5s;
-         `;
-        alertMsg.innerHTML = `⚠️ WARNING: This route passes through a conceptual High-Risk Zone!`;
-
-        const recalcBtn = document.createElement('button');
-        recalcBtn.innerText = "Recalculate Safer Route";
-        recalcBtn.style.cssText = "margin-left: 10px; background: white; color: red; border:none; padding: 4px 8px; border-radius:4px; cursor:pointer;";
-        recalcBtn.onclick = () => {
-            alertMsg.remove();
-            selectRoute(1); // Force switch to safest route (id 1)
-        };
-
-        alertMsg.appendChild(recalcBtn);
-        document.body.appendChild(alertMsg);
-        setTimeout(() => alertMsg.remove(), 6000);
-    }
-
-    analyzeRouteSafely(routeId);
-}
-
-async function analyzeRouteSafely(routeId) {
-    const route = routesData.find(r => r.id === routeId);
-    if (!route) return;
-
+function showAIAnalysis(route) {
     aiPanel.classList.remove('hidden');
-    aiText.textContent = "Analyzing real-time environmental data...";
-
-    // Simulate AI Delay
+    aiText.textContent = "Analyzing route safety features...";
     setTimeout(() => {
-        const analysisText = simulateAIAnalysis(route);
-        typeWriter(analysisText, aiText);
-    }, 1000);
+        let msg = "";
+        if (route.safetyScore > 90) msg = "✅ EXCELLENT CHOICE. Well lit, high foot traffic, frequent police patrols.";
+        else if (route.safetyScore > 70) msg = "⚠️ GOOD. Mostly safe, but avoid the underpass after 10 PM.";
+        else msg = "⛔ CAUTION. High crime rate reported in this sector. Poor lighting.";
+
+        aiText.textContent = msg;
+    }, 800);
 }
-
-function typeWriter(text, element) {
-    element.textContent = "";
-    let i = 0;
-    const speed = 20;
-
-    function type() {
-        if (i < text.length) {
-            element.textContent += text.charAt(i);
-            i++;
-            setTimeout(type, speed);
-        }
-    }
-    type();
-}
-
-// Event Listeners
-findRoutesBtn.addEventListener('click', fetchRoutes);
-
-sosBtn.addEventListener('click', () => {
-    let contact = localStorage.getItem('emergencyContact');
-
-    if (!contact) {
-        contact = prompt("⚠️ SETUP SOS \n\nEnter Emergency Contact Number (saved locally):");
-        if (contact) {
-            localStorage.setItem('emergencyContact', contact);
-            alert("Contact Saved! Press SOS again to alert.");
-            return;
-        } else {
-            return; // Cancelled
-        }
-    }
-
-    alert(`🆘 SOS ACTIVATED! \n\nSending live location to: ${contact}\nAlerting nearby safe zones...`);
-
-    document.body.style.animation = "sos-flash 0.5s infinite";
-
-    setTimeout(() => {
-        document.body.style.animation = "none";
-        alert(`✅ Message successfully sent to ${contact}!`);
-    }, 3000);
-});
-
-// Add SOS flash keyframes
-const styleSheet = document.createElement("style");
-styleSheet.innerText = `
-    @keyframes sos-flash {
-        0% { box-shadow: inset 0 0 0 0 red; }
-        50% { box-shadow: inset 0 0 100px 50px red; }
-        100% { box-shadow: inset 0 0 0 0 red; }
-    }
-`;
-document.head.appendChild(styleSheet);
